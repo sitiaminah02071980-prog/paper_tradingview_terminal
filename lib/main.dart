@@ -1,750 +1,942 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:http/http.dart' as http;
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:intl/intl.dart';
+import 'dart:convert';
+import 'dart:async';
 
 void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PaperTerminalChartApp());
+  runApp(const PaperTradingViewApp());
 }
 
-class PaperTerminalChartApp extends StatelessWidget {
-  const PaperTerminalChartApp({super.key});
+class PaperTradingViewApp extends StatelessWidget {
+  const PaperTradingViewApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Paper TradingView Terminal',
-      debugShowCheckedModeBanner: false,
+      title: 'Trading Terminal Pro',
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0A0E14),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF22C55E),
-          secondary: Color(0xFF38BDF8),
-          surface: Color(0xFF111827),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.cyanAccent,
+          brightness: Brightness.dark,
         ),
       ),
-      home: const PaperChartTerminalPage(),
+      home: const MainShell(),
     );
   }
 }
 
-class PendingPaperOrder {
-  final String side;
-  final String symbol;
-  final double qty;
-  final double price;
-  final double total;
-
-  PendingPaperOrder({
-    required this.side,
-    required this.symbol,
-    required this.qty,
-    required this.price,
-    required this.total,
-  });
-}
-
-class CustomCmdButton {
-  final String label;
-  final String command;
-
-  const CustomCmdButton({
-    required this.label,
-    required this.command,
-  });
-
-  Map<String, String> toMap() => {'label': label, 'command': command};
-
-  factory CustomCmdButton.fromMap(Map<String, dynamic> map) {
-    return CustomCmdButton(
-      label: (map['label'] ?? '').toString(),
-      command: (map['command'] ?? '').toString(),
-    );
-  }
-}
-
-class PaperChartTerminalPage extends StatefulWidget {
-  const PaperChartTerminalPage({super.key});
+// ═══════════════════════════════════════════════════════════════
+// MAIN SHELL - Bottom Navigation
+// ═══════════════════════════════════════════════════════════════
+class MainShell extends StatefulWidget {
+  const MainShell({super.key});
 
   @override
-  State<PaperChartTerminalPage> createState() => _PaperChartTerminalPageState();
+  State<MainShell> createState() => _MainShellState();
 }
 
-class _PaperChartTerminalPageState extends State<PaperChartTerminalPage> {
-  static const String _customBtnStorageKey = 'paper_custom_cmd_buttons_v1';
+class _MainShellState extends State<MainShell> {
+  int _currentIndex = 0;
 
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
-  late final WebViewController _tvController;
-  final TextEditingController _cmdCtrl = TextEditingController();
-
-  String _activeSymbol = 'BTCUSDT';
-  final String _interval = '15';
-  double _balanceUsd = 10000.0;
-  String _accountId = 'TRD-PAPER';
-  bool _hasApiKey = false;
-
-  final Map<String, double> _prices = {
-    'BTCUSDT': 88420.50,
-    'ETHUSDT': 3120.00,
-    'SOLUSDT': 195.40,
-  };
-
-  final Map<String, double> _positions = {
-    'BTCUSDT': 0.05,
-  };
-
-  PendingPaperOrder? _pendingOrder;
-  String _lastStatus =
-      'PAPER MODE aktif. Gunakan tombol di bawah atau ketik perintah.';
-
-  final List<CustomCmdButton> _defaultButtons = const [
-    CustomCmdButton(label: 'Price', command: 'price'),
-    CustomCmdButton(label: 'Balance', command: 'balance'),
-    CustomCmdButton(label: 'Buy 0.01 BTC', command: 'buy 0.01 btc'),
-    CustomCmdButton(label: 'Env', command: 'env'),
+  final List<Widget> _pages = [
+    const ChartPage(),
+    const TerminalPage(),
+    const PortfolioPage(),
+    const SettingsPage(),
   ];
 
-  List<CustomCmdButton> _customButtons = [];
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: IndexedStack(index: _currentIndex, children: _pages),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: (i) => setState(() => _currentIndex = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.candlestick_chart), label: 'Chart'),
+          NavigationDestination(icon: Icon(Icons.terminal), label: 'Terminal'),
+          NavigationDestination(icon: Icon(Icons.account_balance_wallet), label: 'Portfolio'),
+          NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHART PAGE - Multi-Timeframe TradingView
+// ═══════════════════════════════════════════════════════════════
+class ChartPage extends StatefulWidget {
+  const ChartPage({super.key});
+
+  @override
+  State<ChartPage> createState() => _ChartPageState();
+}
+
+class _ChartPageState extends State<ChartPage> {
+  late final WebViewController _webViewController;
+  bool _isLoading = true;
+  String _symbol = 'BINANCE:BTCUSDT';
+  String _timeframe = '1H';
+  final List<String> _symbols = ['BINANCE:BTCUSDT', 'BINANCE:ETHUSDT', 'BINANCE:BNBUSDT', 'BINANCE:SOLUSDT', 'BINANCE:XRPUSDT'];
+  final List<String> _timeframes = ['1m', '5m', '15m', '30m', '1H', '4H', '1D', '1W'];
 
   @override
   void initState() {
     super.initState();
-    _loadState();
-    _tvController = WebViewController()
+    _initWebView();
+  }
+
+  void _initWebView() {
+    _webViewController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setBackgroundColor(const Color(0xFF0A0E14))
-      ..loadHtmlString(_buildTradingViewHtml(_activeSymbol, _interval));
+      ..setNavigationDelegate(NavigationDelegate(
+        onPageStarted: (_) => setState(() => _isLoading = true),
+        onPageFinished: (_) => setState(() => _isLoading = false),
+      ))
+      ..loadRequest(Uri.parse(_buildChartUrl()));
   }
 
-  Future<void> _loadState() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_customBtnStorageKey);
-    final savedAcc = await _secureStorage.read(key: 'trd_account_id');
-    final savedKey = await _secureStorage.read(key: 'trd_api_key');
-
-    setState(() {
-      if (savedAcc != null && savedAcc.isNotEmpty) {
-        _accountId = savedAcc;
-      }
-      _hasApiKey = savedKey != null && savedKey.isNotEmpty;
-      if (raw != null && raw.isNotEmpty) {
-        try {
-          final decoded = jsonDecode(raw) as List<dynamic>;
-          _customButtons = decoded
-              .map((item) =>
-                  CustomCmdButton.fromMap(Map<String, dynamic>.from(item as Map)))
-              .where((b) => b.label.isNotEmpty && b.command.isNotEmpty)
-              .toList();
-        } catch (_) {}
-      }
-    });
+  String _buildChartUrl() {
+    final tf = _timeframe.toLowerCase().replaceAll('m', '').replaceAll('h', 'H').replaceAll('d', 'D').replaceAll('w', 'W');
+    return 'https://www.tradingview.com/chart/?symbol=$_symbol&interval=$tf';
   }
 
-  Future<void> _persistCustomButtons() async {
-    final prefs = await SharedPreferences.getInstance();
-    final encoded = jsonEncode(_customButtons.map((b) => b.toMap()).toList());
-    await prefs.setString(_customBtnStorageKey, encoded);
-  }
-
-  Future<void> _openAccountApiDialog() async {
-    final accCtrl = TextEditingController(text: _accountId);
-    final keyCtrl = TextEditingController(
-      text: (await _secureStorage.read(key: 'trd_api_key')) ?? '',
-    );
-    final secretCtrl = TextEditingController(
-      text: (await _secureStorage.read(key: 'trd_api_secret')) ?? '',
-    );
-
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF111827),
-          title: const Text(
-            'Akun & API Vault (Paper Mode)',
-            style: TextStyle(fontFamily: 'monospace', fontSize: 15),
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: accCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'ID Akun Trading',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: keyCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'API Key (Opsional di Paper Mode)',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: secretCtrl,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'API Secret',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Tutup'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final acc = accCtrl.text.trim();
-                final key = keyCtrl.text.trim();
-                final sec = secretCtrl.text.trim();
-                if (acc.isNotEmpty) {
-                  await _secureStorage.write(key: 'trd_account_id', value: acc);
-                }
-                if (key.isNotEmpty) {
-                  await _secureStorage.write(key: 'trd_api_key', value: key);
-                } else {
-                  await _secureStorage.delete(key: 'trd_api_key');
-                }
-                if (sec.isNotEmpty) {
-                  await _secureStorage.write(key: 'trd_api_secret', value: sec);
-                } else {
-                  await _secureStorage.delete(key: 'trd_api_secret');
-                }
-                setState(() {
-                  if (acc.isNotEmpty) _accountId = acc;
-                  _hasApiKey = key.isNotEmpty;
-                  _lastStatus =
-                      'Konfigurasi akun ($_accountId) & API vault diperbarui.';
-                });
-                if (ctx.mounted) Navigator.pop(ctx);
-              },
-              child: const Text('Simpan'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Future<void> _openCreateButtonDialog() async {
-    final labelCtrl = TextEditingController();
-    final cmdCtrl = TextEditingController();
-
-    final created = await showDialog<CustomCmdButton>(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF111827),
-          title: const Text(
-            'Buat Tombol Kustom',
-            style: TextStyle(fontFamily: 'monospace', fontSize: 15),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: labelCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Nama Tombol (cth: Buy SOL)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: cmdCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Perintah Terminal (cth: buy 1 sol)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Batal'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final label = labelCtrl.text.trim();
-                final command = cmdCtrl.text.trim();
-                if (label.isEmpty || command.isEmpty) return;
-                Navigator.pop(
-                    ctx, CustomCmdButton(label: label, command: command));
-              },
-              child: const Text('Simpan'),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (created != null) {
-      setState(() {
-        _customButtons.add(created);
-        _lastStatus =
-            'Tombol "${created.label}" ditambahkan -> `${created.command}`';
-      });
-      await _persistCustomButtons();
-    }
-  }
-
-  Future<void> _removeCustomButton(int index) async {
-    final removed = _customButtons[index];
-    setState(() {
-      _customButtons.removeAt(index);
-      _lastStatus = 'Tombol kustom "${removed.label}" dihapus.';
-    });
-    await _persistCustomButtons();
-  }
-
-  String _buildTradingViewHtml(String symbol, String interval) {
-    final tvSymbol = 'BINANCE:$symbol';
-    final config = jsonEncode({
-      'autosize': true,
-      'symbol': tvSymbol,
-      'interval': interval,
-      'timezone': 'Asia/Jakarta',
-      'theme': 'dark',
-      'style': '1',
-      'locale': 'id',
-      'enable_publishing': false,
-      'hide_top_toolbar': false,
-      'allow_symbol_change': false,
-      'save_image': false,
-      'backgroundColor': 'rgba(10, 14, 20, 1)',
-    });
-
-    return '''
-<!DOCTYPE html>
-<html>
-<head>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <style>
-    html, body, #tv_wrap {
-      margin: 0;
-      padding: 0;
-      width: 100%;
-      height: 100%;
-      background-color: #0A0E14;
-      overflow: hidden;
-    }
-  </style>
-</head>
-<body>
-  <div id="tv_wrap">
-    <div class="tradingview-widget-container" style="width:100%;height:100%;">
-      <div id="tv_chart" style="width:100%;height:100%;"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-      <script type="text/javascript">
-        new TradingView.widget($config);
-      </script>
-    </div>
-  </div>
-</body>
-</html>
-''';
-  }
-
-  void _setChartSymbol(String symbol) {
-    if (!_prices.containsKey(symbol)) return;
-    setState(() {
-      _activeSymbol = symbol;
-      _lastStatus =
-          'Chart dialihkan ke $symbol (\$${_prices[symbol]!.toStringAsFixed(2)})';
-    });
-    _tvController.loadHtmlString(_buildTradingViewHtml(_activeSymbol, _interval));
-  }
-
-  String _normalizeSymbol(String raw) {
-    final upper = raw.toUpperCase().replaceAll('/', '');
-    if (_prices.containsKey(upper)) return upper;
-    final withUsdt = '${upper}USDT';
-    if (_prices.containsKey(withUsdt)) return withUsdt;
-    return upper;
-  }
-
-  void _submitCommand(String raw) {
-    final cmd = raw.trim();
-    if (cmd.isEmpty) return;
-    _cmdCtrl.clear();
-    final lower = cmd.toLowerCase();
-
-    if (_pendingOrder != null) {
-      if (lower == 'y' || lower == 'ya' || lower == 'yes') {
-        final o = _pendingOrder!;
-        setState(() {
-          _pendingOrder = null;
-          if (o.side == 'BUY') {
-            _balanceUsd -= o.total;
-            _positions[o.symbol] = (_positions[o.symbol] ?? 0.0) + o.qty;
-          } else {
-            _positions[o.symbol] = (_positions[o.symbol] ?? 0.0) - o.qty;
-            _balanceUsd += o.total;
-          }
-          _lastStatus =
-              '[PAPER EXEC] ${o.side} ${o.qty} ${o.symbol} @ \$${o.price.toStringAsFixed(2)} | Kas: \$${_balanceUsd.toStringAsFixed(2)}';
-        });
-        return;
-      } else if (lower == 'n' || lower == 'batal' || lower == 'no') {
-        setState(() {
-          _pendingOrder = null;
-          _lastStatus = '[PAPER CANCEL] Order dibatalkan.';
-        });
-        return;
-      } else {
-        setState(() {
-          _lastStatus =
-              'Konfirmasi order aktif: ketik `y` untuk eksekusi atau `n` untuk batal.';
-        });
-        return;
-      }
-    }
-
-    if (lower == 'env') {
-      setState(() {
-        _lastStatus =
-            'ACCOUNT=$_accountId | MODE=PAPER | API=${_hasApiKey ? "SET" : "NONE"}';
-      });
-      return;
-    }
-
-    if (lower == 'balance' || lower == 'saldo') {
-      final posText = _positions.entries
-          .where((e) => e.value > 0)
-          .map((e) => '${e.key}:${e.value}')
-          .join(', ');
-      setState(() {
-        _lastStatus =
-            'Kas: \$${_balanceUsd.toStringAsFixed(2)} | Posisi: ${posText.isEmpty ? "-" : posText}';
-      });
-      return;
-    }
-
-    if (lower.startsWith('price')) {
-      final parts = lower.split(RegExp(r'\s+'));
-      final sym = parts.length > 1 ? _normalizeSymbol(parts[1]) : _activeSymbol;
-      final px = _prices[sym];
-      setState(() {
-        _lastStatus = px != null
-            ? '$sym => \$${px.toStringAsFixed(2)} (PAPER)'
-            : 'Simbol $sym tidak tersedia (btc, eth, sol).';
-      });
-      return;
-    }
-
-    if (lower.startsWith('chart ')) {
-      final parts = lower.split(RegExp(r'\s+'));
-      if (parts.length >= 2) {
-        final sym = _normalizeSymbol(parts[1]);
-        if (_prices.containsKey(sym)) {
-          _setChartSymbol(sym);
-          return;
-        }
-      }
-      setState(() {
-        _lastStatus = 'Format: chart <btc|eth|sol>';
-      });
-      return;
-    }
-
-    if (lower.startsWith('buy ') || lower.startsWith('sell ')) {
-      final parts = lower.split(RegExp(r'\s+'));
-      if (parts.length < 3) {
-        setState(() {
-          _lastStatus = 'Format: buy <qty> <symbol> atau sell <qty> <symbol>';
-        });
-        return;
-      }
-      final side = parts[0].toUpperCase();
-      final qty = double.tryParse(parts[1]);
-      final sym = _normalizeSymbol(parts[2]);
-      final px = _prices[sym];
-
-      if (qty == null || qty <= 0 || px == null) {
-        setState(() {
-          _lastStatus = 'Perintah tidak valid. Contoh: buy 0.05 btc';
-        });
-        return;
-      }
-
-      final total = qty * px;
-      if (side == 'BUY' && total > _balanceUsd) {
-        setState(() {
-          _lastStatus =
-              'Ditolak: butuh \$${total.toStringAsFixed(2)}, saldo \$${_balanceUsd.toStringAsFixed(2)}.';
-        });
-        return;
-      }
-
-      final currentQty = _positions[sym] ?? 0.0;
-      if (side == 'SELL' && qty > currentQty) {
-        setState(() {
-          _lastStatus = 'Ditolak: posisi $sym hanya $currentQty.';
-        });
-        return;
-      }
-
-      if (_activeSymbol != sym) {
-        _setChartSymbol(sym);
-      }
-
-      setState(() {
-        _pendingOrder = PendingPaperOrder(
-          side: side,
-          symbol: sym,
-          qty: qty,
-          price: px,
-          total: total,
-        );
-        _lastStatus =
-            'Preview $side $qty $sym @ ~\$${px.toStringAsFixed(2)} (Total \$${total.toStringAsFixed(2)}) -> ketik `y` atau `n`';
-      });
-      return;
-    }
-
-    setState(() {
-      _lastStatus =
-          'Perintah: env | price [sym] | balance | chart <sym> | buy <qty> <sym> | sell <qty> <sym>';
-    });
-  }
-
-  Widget _buildPillButton({
-    required String label,
-    required VoidCallback onTap,
-    VoidCallback? onLongPress,
-    Color bgColor = const Color(0xFF1E293B),
-    Color borderColor = const Color(0xFF334155),
-    Color textColor = const Color(0xFFE2E8F0),
-    IconData? icon,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: Material(
-        color: bgColor,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-          side: BorderSide(color: borderColor),
-        ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(8),
-          onTap: onTap,
-          onLongPress: onLongPress,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (icon != null) ...[
-                  Icon(icon, size: 14, color: textColor),
-                  const SizedBox(width: 4),
-                ],
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: textColor,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+  void _reloadChart() {
+    _webViewController.loadRequest(Uri.parse(_buildChartUrl()));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            Container(
-              color: const Color(0xFF111827),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                children: [
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF14532D),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      'PAPER',
-                      style: TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Color(0xFF4ADE80),
-                      ),
-                    ),
+      appBar: AppBar(
+        title: const Text('Multi-Timeframe Chart'),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _reloadChart),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Symbol & Timeframe selectors
+          Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _symbol,
+                    decoration: const InputDecoration(labelText: 'Symbol', border: OutlineInputBorder()),
+                    items: _symbols.map((s) => DropdownMenuItem(value: s, child: Text(s.split(':')[1]))).toList(),
+                    onChanged: (v) { setState(() => _symbol = v!); _reloadChart(); },
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: _prices.keys.map((sym) {
-                          final active = sym == _activeSymbol;
-                          return Padding(
-                            padding: const EdgeInsets.only(right: 6),
-                            child: ChoiceChip(
-                              label: Text(
-                                sym,
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                ),
-                              ),
-                              selected: active,
-                              onSelected: (_) => _setChartSymbol(sym),
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _timeframe,
+                    decoration: const InputDecoration(labelText: 'Timeframe', border: OutlineInputBorder()),
+                    items: _timeframes.map((t) => DropdownMenuItem(value: t, child: Text(t))).toList(),
+                    onChanged: (v) { setState(() => _timeframe = v!); _reloadChart(); },
                   ),
-                  IconButton(
-                    tooltip: 'Akun & API Vault',
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(
-                      Icons.vpn_key_outlined,
-                      size: 18,
-                      color: _hasApiKey
-                          ? const Color(0xFF4ADE80)
-                          : const Color(0xFF94A3B8),
-                    ),
-                    onPressed: _openAccountApiDialog,
-                  ),
-                ],
+                ),
+              ],
+            ),
+          ),
+          // Quick timeframe chips
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: _timeframes.map((tf) => Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: ChoiceChip(
+                  label: Text(tf),
+                  selected: _timeframe == tf,
+                  onSelected: (_) { setState(() => _timeframe = tf); _reloadChart(); },
+                ),
+              )).toList(),
+            ),
+          ),
+          // WebView
+          Expanded(
+            child: Stack(
+              children: [
+                WebViewWidget(controller: _webViewController),
+                if (_isLoading) const Center(child: CircularProgressIndicator()),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TERMINAL PAGE - CLI with Paper & Real Trading
+// ═══════════════════════════════════════════════════════════════
+class TerminalPage extends StatefulWidget {
+  const TerminalPage({super.key});
+
+  @override
+  State<TerminalPage> createState() => _TerminalPageState();
+}
+
+class _TerminalPageState extends State<TerminalPage> {
+  final TextEditingController _cliController = TextEditingController();
+  final List<String> _terminalOutput = [];
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final NotificationService _notifService = NotificationService();
+
+  bool _isRealMode = false;
+  double _paperBalance = 10000.0;
+  String _binanceApiKey = '';
+  String _binanceSecret = '';
+  String _mt5Login = '';
+  String _mt5Password = '';
+  String _mt5Server = '';
+  String _aiApiKey = '';
+  String _aiProvider = 'openai'; // openai, claude, gemini
+  final List<Map<String, dynamic>> _positions = [];
+  final List<Map<String, dynamic>> _tradeHistory = [];
+  final List<Map<String, String>> _aiChatHistory = [];
+  bool _aiLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+    _notifService.init();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _paperBalance = prefs.getDouble('paper_balance') ?? 10000.0;
+      _isRealMode = prefs.getBool('real_mode') ?? false;
+    });
+    _binanceApiKey = await _secureStorage.read(key: 'binance_api_key') ?? '';
+    _binanceSecret = await _secureStorage.read(key: 'binance_secret') ?? '';
+    _mt5Login = await _secureStorage.read(key: 'mt5_login') ?? '';
+    _mt5Password = await _secureStorage.read(key: 'mt5_password') ?? '';
+    _mt5Server = await _secureStorage.read(key: 'mt5_server') ?? '';
+    _aiApiKey = await _secureStorage.read(key: 'ai_api_key') ?? '';
+    _aiProvider = await _secureStorage.read(key: 'ai_provider') ?? 'openai';
+  }
+
+  Future<void> _savePaperBalance(double v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('paper_balance', v);
+    setState(() => _paperBalance = v);
+  }
+
+  void _log(String msg) => setState(() => _terminalOutput.add(msg));
+
+  void _executeCommand(String command) {
+    final trimmed = command.trim();
+    if (trimmed.isEmpty) return;
+    _log('> $trimmed');
+    final parts = trimmed.split(RegExp(r'\s+'));
+    final cmd = parts[0].toLowerCase();
+
+    switch (cmd) {
+      case 'buy': _handleBuy(parts); break;
+      case 'sell': _handleSell(parts); break;
+      case 'balance': _handleBalance(); break;
+      case 'positions': _handlePositions(); break;
+      case 'history': _handleHistory(); break;
+      case 'mode': _handleMode(parts); break;
+      case 'vault': _handleVault(parts); break;
+      case 'ai': _handleAI(parts); break;
+      case 'signal': _handleSignal(parts); break;
+      case 'clear': setState(() => _terminalOutput.clear()); break;
+      case 'help': _handleHelp(); break;
+      default: _log('Unknown command: $cmd. Type "help".');
+    }
+    _cliController.clear();
+  }
+
+  void _handleBuy(List<String> parts) {
+    if (parts.length < 3) { _log('Usage: buy <symbol> <amount>'); return; }
+    final symbol = parts[1].toUpperCase();
+    final amount = double.tryParse(parts[2]) ?? 0;
+    if (_isRealMode) {
+      _log('🔴 REAL MODE: Executing buy $amount $symbol via broker...');
+      _executeRealOrder('BUY', symbol, amount);
+    } else {
+      final cost = amount * 100;
+      if (cost > _paperBalance) { _log('Insufficient balance. Current: \$${_paperBalance.toStringAsFixed(2)}'); return; }
+      _savePaperBalance(_paperBalance - cost);
+      _positions.add({'symbol': symbol, 'side': 'BUY', 'amount': amount, 'price': 100.0, 'time': DateTime.now()});
+      _tradeHistory.add({'action': 'BUY', 'symbol': symbol, 'amount': amount, 'price': 100.0, 'time': DateTime.now(), 'mode': 'PAPER'});
+      _log('PAPER BUY: $amount $symbol @ \$100.00 = \$${cost.toStringAsFixed(2)}');
+      _log('New balance: \$${_paperBalance.toStringAsFixed(2)}');
+      _notifService.show('Paper Buy Executed', '$amount $symbol @ \$100.00');
+    }
+  }
+
+  void _handleSell(List<String> parts) {
+    if (parts.length < 3) { _log('Usage: sell <symbol> <amount>'); return; }
+    final symbol = parts[1].toUpperCase();
+    final amount = double.tryParse(parts[2]) ?? 0;
+    if (_isRealMode) {
+      _log('🔴 REAL MODE: Executing sell $amount $symbol via broker...');
+      _executeRealOrder('SELL', symbol, amount);
+    } else {
+      final proceeds = amount * 100;
+      _savePaperBalance(_paperBalance + proceeds);
+      _positions.add({'symbol': symbol, 'side': 'SELL', 'amount': amount, 'price': 100.0, 'time': DateTime.now()});
+      _tradeHistory.add({'action': 'SELL', 'symbol': symbol, 'amount': amount, 'price': 100.0, 'time': DateTime.now(), 'mode': 'PAPER'});
+      _log('PAPER SELL: $amount $symbol @ \$100.00 = \$${proceeds.toStringAsFixed(2)}');
+      _log('New balance: \$${_paperBalance.toStringAsFixed(2)}');
+      _notifService.show('Paper Sell Executed', '$amount $symbol @ \$100.00');
+    }
+  }
+
+  Future<void> _executeRealOrder(String action, String symbol, double amount) async {
+    // Binance API integration
+    if (_binanceApiKey.isNotEmpty) {
+      try {
+        final url = Uri.parse('https://api.binance.com/api/v3/order');
+        final response = await http.post(url, headers: {
+          'X-MBX-APIKEY': _binanceApiKey,
+        }, body: {
+          'symbol': symbol,
+          'side': action,
+          'type': 'MARKET',
+          'quantity': amount.toString(),
+        });
+        if (response.statusCode == 200) {
+          _log('✅ Order executed on Binance: $action $amount $symbol');
+          _notifService.show('Real Order Executed', '$action $amount $symbol on Binance');
+          _tradeHistory.add({'action': action, 'symbol': symbol, 'amount': amount, 'price': 0.0, 'time': DateTime.now(), 'mode': 'REAL'});
+        } else {
+          _log('❌ Binance error: ${response.statusCode} - ${response.body}');
+        }
+      } catch (e) {
+        _log('❌ Binance connection error: $e');
+      }
+    } else if (_mt5Login.isNotEmpty) {
+      _log('MT5 integration: Use metatrader-terminal MCP for order execution');
+      _log('Command: $action $symbol $amount (send via MT5 terminal)');
+    } else {
+      _log('⚠️ No broker configured. Set API keys in Settings → Vault.');
+    }
+  }
+
+  void _handleBalance() {
+    _log('Mode: ${_isRealMode ? "🔴 REAL" : "🟢 PAPER"}');
+    _log('Paper Balance: \$${_paperBalance.toStringAsFixed(2)}');
+    _log('Open Positions: ${_positions.length}');
+  }
+
+  void _handlePositions() {
+    if (_positions.isEmpty) { _log('No open positions.'); return; }
+    _log('--- Open Positions ---');
+    for (final p in _positions) {
+      _log('${p['side']} ${p['amount']} ${p['symbol']} @ \$${p['price']} (${p['time']})');
+    }
+  }
+
+  void _handleHistory() {
+    if (_tradeHistory.isEmpty) { _log('No trade history.'); return; }
+    _log('--- Trade History (last 10) ---');
+    for (final t in _tradeHistory.reversed.take(10)) {
+      _log('${t['mode']} ${t['action']} ${t['amount']} ${t['symbol']} @ \$${t['price']} (${t['time']})');
+    }
+  }
+
+  void _handleMode(List<String> parts) {
+    if (parts.length < 2) {
+      _log('Usage: mode paper | mode real');
+      _log('Current mode: ${_isRealMode ? "REAL" : "PAPER"}');
+      return;
+    }
+    final mode = parts[1].toLowerCase();
+    if (mode == 'real') {
+      if (_binanceApiKey.isEmpty && _mt5Login.isEmpty) {
+        _log('⚠️ No broker API configured. Set credentials in Settings first.');
+        return;
+      }
+      setState(() => _isRealMode = true);
+      SharedPreferences.getInstance().then((p) => p.setBool('real_mode', true));
+      _log('🔴 Switched to REAL trading mode.');
+      _notifService.show('Mode Changed', 'Switched to REAL trading mode');
+    } else {
+      setState(() => _isRealMode = false);
+      SharedPreferences.getInstance().then((p) => p.setBool('real_mode', false));
+      _log('🟢 Switched to PAPER trading mode.');
+    }
+  }
+
+  void _handleVault(List<String> parts) {
+    if (parts.length < 2) {
+      _log('Usage: vault binance set <api_key> <secret> | vault mt5 set <login> <password> <server> | vault ai set <api_key> [openai|claude|gemini] | vault show | vault clear');
+      return;
+    }
+    final sub = parts[1].toLowerCase();
+    if (sub == 'binance' && parts.length >= 5 && parts[2] == 'set') {
+      _secureStorage.write(key: 'binance_api_key', value: parts[3]);
+      _secureStorage.write(key: 'binance_secret', value: parts[4]);
+      setState(() { _binanceApiKey = parts[3]; _binanceSecret = parts[4]; });
+      _log('✅ Binance API credentials saved.');
+    } else if (sub == 'mt5' && parts.length >= 6 && parts[2] == 'set') {
+      _secureStorage.write(key: 'mt5_login', value: parts[3]);
+      _secureStorage.write(key: 'mt5_password', value: parts[4]);
+      _secureStorage.write(key: 'mt5_server', value: parts[5]);
+      setState(() { _mt5Login = parts[3]; _mt5Password = parts[4]; _mt5Server = parts[5]; });
+      _log('✅ MT5 credentials saved.');
+    } else if (sub == 'ai' && parts.length >= 4 && parts[2] == 'set') {
+      _secureStorage.write(key: 'ai_api_key', value: parts[3]);
+      final provider = parts.length >= 5 ? parts[4].toLowerCase() : 'openai';
+      _secureStorage.write(key: 'ai_provider', value: provider);
+      setState(() { _aiApiKey = parts[3]; _aiProvider = provider; });
+      _log('✅ AI API key saved. Provider: $provider');
+    } else if (sub == 'show') {
+      _log('Binance API: ${_binanceApiKey.isEmpty ? "(not set)" : "${_binanceApiKey.substring(0, 6)}..."}');
+      _log('MT5 Login: ${_mt5Login.isEmpty ? "(not set)" : _mt5Login}');
+      _log('MT5 Server: ${_mt5Server.isEmpty ? "(not set)" : _mt5Server}');
+      _log('AI API Key: ${_aiApiKey.isEmpty ? "(not set)" : "****${_aiApiKey.substring(_aiApiKey.length - 4)}"}');
+      _log('AI Provider: $_aiProvider');
+    } else if (sub == 'clear') {
+      _secureStorage.deleteAll();
+      setState(() { _binanceApiKey = ''; _binanceSecret = ''; _mt5Login = ''; _mt5Password = ''; _mt5Server = ''; _aiApiKey = ''; _aiProvider = 'openai'; });
+      _log('✅ All credentials cleared.');
+    } else {
+      _log('Unknown vault command.');
+    }
+  }
+
+  void _handleSignal(List<String> parts) {
+    if (parts.length < 3) {
+      _log('Usage: signal <symbol> <BUY|SELL> [price]');
+      return;
+    }
+    final symbol = parts[1].toUpperCase();
+    final signal = parts[2].toUpperCase();
+    final price = parts.length > 3 ? parts[3] : 'market';
+    _log('📡 Signal sent: $signal $symbol @ $price');
+    _notifService.show('Trading Signal', '$signal $symbol @ $price');
+  }
+
+  void _handleAI(List<String> parts) {
+    if (parts.length < 2) {
+      _log('Usage: ai <question> | ai analyze <symbol> | ai signal <symbol> | ai explain <topic>');
+      _log('AI Provider: $_aiProvider');
+      _log('AI API Key: ${_aiApiKey.isEmpty ? "(not set)" : "****${_aiApiKey.substring(_aiApiKey.length - 4)}"}');
+      return;
+    }
+    final sub = parts[1].toLowerCase();
+    if (sub == 'analyze' && parts.length >= 3) {
+      final symbol = parts[2].toUpperCase();
+      _aiAnalyzeMarket(symbol);
+    } else if (sub == 'signal' && parts.length >= 3) {
+      final symbol = parts[2].toUpperCase();
+      _aiGenerateSignal(symbol);
+    } else if (sub == 'explain' && parts.length >= 3) {
+      final topic = parts.sublist(2).join(' ');
+      _aiExplain(topic);
+    } else {
+      final question = parts.sublist(1).join(' ');
+      _aiChat(question);
+    }
+  }
+
+  Future<void> _aiChat(String question) async {
+    if (_aiApiKey.isEmpty) {
+      _log('⚠️ AI API key not set. Use: vault ai set <api_key> [provider]');
+      _log('Supported providers: openai, claude, gemini');
+      return;
+    }
+    _log('🤖 AI: Thinking...');
+    setState(() => _aiLoading = true);
+    try {
+      final response = await _callAI(
+        'You are an expert trading assistant. Answer concisely and helpfully. '
+        'The user is a trader using a Flutter trading terminal app. '
+        'Current mode: ${_isRealMode ? "REAL" : "PAPER"}. '
+        'Paper balance: \$${_paperBalance.toStringAsFixed(2)}. '
+        'Open positions: ${_positions.length}.',
+        question,
+      );
+      _log('🤖 AI: $response');
+      _aiChatHistory.add({'role': 'user', 'content': question});
+      _aiChatHistory.add({'role': 'assistant', 'content': response});
+      _notifService.show('AI Response', response.length > 100 ? '${response.substring(0, 100)}...' : response);
+    } catch (e) {
+      _log('❌ AI Error: $e');
+    }
+    setState(() => _aiLoading = false);
+  }
+
+  Future<void> _aiAnalyzeMarket(String symbol) async {
+    if (_aiApiKey.isEmpty) { _log('⚠️ Set AI API key first.'); return; }
+    _log('🤖 AI: Analyzing $symbol market...');
+    setState(() => _aiLoading = true);
+    try {
+      final response = await _callAI(
+        'You are a professional market analyst. Provide a concise technical analysis. '
+        'Include: trend direction, support/resistance levels, key indicators, and risk assessment. '
+        'Format with bullet points. Keep it under 200 words.',
+        'Analyze the current market conditions for $symbol. Consider price action, volume, and momentum. '
+        'Current paper balance: \$${_paperBalance.toStringAsFixed(2)}. Mode: ${_isRealMode ? "REAL" : "PAPER"}.',
+      );
+      _log('📊 AI Market Analysis [$symbol]:');
+      _log(response);
+    } catch (e) {
+      _log('❌ AI Error: $e');
+    }
+    setState(() => _aiLoading = false);
+  }
+
+  Future<void> _aiGenerateSignal(String symbol) async {
+    if (_aiApiKey.isEmpty) { _log('⚠️ Set AI API key first.'); return; }
+    _log('🤖 AI: Generating trading signal for $symbol...');
+    setState(() => _aiLoading = true);
+    try {
+      final response = await _callAI(
+        'You are a trading signal generator. Output a clear, actionable signal. '
+        'Format: SIGNAL: BUY/SELL/HOLD, ENTRY: price, SL: price, TP: price, CONFIDENCE: X%, REASON: brief explanation. '
+        'Keep it concise.',
+        'Generate a trading signal for $symbol. Consider current market conditions, support/resistance, and momentum. '
+        'Risk level: moderate. Account balance: \$${_paperBalance.toStringAsFixed(2)}.',
+      );
+      _log('📡 AI Signal [$symbol]:');
+      _log(response);
+      _notifService.show('AI Trading Signal', response.length > 100 ? '${response.substring(0, 100)}...' : response);
+    } catch (e) {
+      _log('❌ AI Error: $e');
+    }
+    setState(() => _aiLoading = false);
+  }
+
+  Future<void> _aiExplain(String topic) async {
+    if (_aiApiKey.isEmpty) { _log('⚠️ Set AI API key first.'); return; }
+    _log('🤖 AI: Explaining "$topic"...');
+    setState(() => _aiLoading = true);
+    try {
+      final response = await _callAI(
+        'You are a trading educator. Explain concepts clearly and concisely for a beginner-to-intermediate trader. '
+        'Use simple language and practical examples. Keep under 150 words.',
+        'Explain: $topic',
+      );
+      _log('📚 AI Explanation:');
+      _log(response);
+    } catch (e) {
+      _log('❌ AI Error: $e');
+    }
+    setState(() => _aiLoading = false);
+  }
+
+  Future<String> _callAI(String systemPrompt, String userMessage) async {
+    if (_aiProvider == 'openai') {
+      final url = Uri.parse('https://api.openai.com/v1/chat/completions');
+      final response = await http.post(url, headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $_aiApiKey',
+      }, body: jsonEncode({
+        'model': 'gpt-4o-mini',
+        'messages': [
+          {'role': 'system', 'content': systemPrompt},
+          {'role': 'user', 'content': userMessage},
+        ],
+        'max_tokens': 500,
+        'temperature': 0.7,
+      }));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['choices'][0]['message']['content'] ?? 'No response';
+      } else {
+        throw Exception('OpenAI API error: ${response.statusCode} - ${response.body}');
+      }
+    } else if (_aiProvider == 'claude') {
+      final url = Uri.parse('https://api.anthropic.com/v1/messages');
+      final response = await http.post(url, headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': _aiApiKey,
+        'anthropic-version': '2023-06-01',
+      }, body: jsonEncode({
+        'model': 'claude-3-haiku-20240307',
+        'max_tokens': 500,
+        'system': systemPrompt,
+        'messages': [
+          {'role': 'user', 'content': userMessage},
+        ],
+      }));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['content'][0]['text'] ?? 'No response';
+      } else {
+        throw Exception('Claude API error: ${response.statusCode} - ${response.body}');
+      }
+    } else if (_aiProvider == 'gemini') {
+      final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$_aiApiKey');
+      final response = await http.post(url, headers: {
+        'Content-Type': 'application/json',
+      }, body: jsonEncode({
+        'contents': [
+          {'parts': [{'text': '$systemPrompt\n\n$userMessage'}]},
+        ],
+        'generationConfig': {'maxOutputTokens': 500, 'temperature': 0.7},
+      }));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['candidates'][0]['content']['parts'][0]['text'] ?? 'No response';
+      } else {
+        throw Exception('Gemini API error: ${response.statusCode} - ${response.body}');
+      }
+    }
+    throw Exception('Unknown AI provider: $_aiProvider');
+  }
+
+  void _handleHelp() {
+    _log('--- Available Commands ---');
+    _log('  buy <symbol> <amount>     - Buy (paper or real)');
+    _log('  sell <symbol> <amount>    - Sell (paper or real)');
+    _log('  balance                   - Show balance & mode');
+    _log('  positions                 - Show open positions');
+    _log('  history                   - Show trade history');
+    _log('  mode paper|real           - Switch trading mode');
+    _log('  vault binance set <key> <secret>');
+    _log('  vault mt5 set <login> <pass> <server>');
+    _log('  vault show|clear          - Manage credentials');
+    _log('  signal <symbol> <BUY|SELL> [price] - Send trading signal');
+    _log('  ai <question>             - Ask AI anything');
+    _log('  ai analyze <symbol>       - AI market analysis');
+    _log('  ai signal <symbol>        - AI trading signal');
+    _log('  ai explain <topic>        - AI concept explanation');
+    _log('  vault ai set <key> [provider] - Set AI API key');
+    _log('  clear                     - Clear terminal');
+    _log('  help                      - Show this help');
+  }
+
+  @override
+  void dispose() {
+    _cliController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Terminal ${_isRealMode ? "🔴 REAL" : "🟢 PAPER"}'),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: Container(
+              color: Colors.black,
+              padding: const EdgeInsets.all(8),
+              child: ListView.builder(
+                itemCount: _terminalOutput.length,
+                itemBuilder: (context, index) => Text(
+                  _terminalOutput[index],
+                  style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 12),
+                ),
               ),
             ),
-            Expanded(
-              child: WebViewWidget(controller: _tvController),
+          ),
+          Container(
+            padding: const EdgeInsets.all(8),
+            color: Colors.grey[900],
+            child: Row(
+              children: [
+                const Text('\$ ', style: TextStyle(color: Colors.greenAccent, fontFamily: 'monospace')),
+                Expanded(
+                  child: TextField(
+                    controller: _cliController,
+                    style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                    decoration: const InputDecoration(border: InputBorder.none, hintText: 'Enter command...'),
+                    onSubmitted: _executeCommand,
+                  ),
+                ),
+                IconButton(icon: const Icon(Icons.send, color: Colors.cyanAccent), onPressed: () => _executeCommand(_cliController.text)),
+              ],
             ),
-            Container(
-              color: const Color(0xFF0F172A),
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _lastStatus,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                      color: Color(0xFF93C5FD),
-                    ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PORTFOLIO PAGE - Dashboard with Charts
+// ═══════════════════════════════════════════════════════════════
+class PortfolioPage extends StatefulWidget {
+  const PortfolioPage({super.key});
+
+  @override
+  State<PortfolioPage> createState() => _PortfolioPageState();
+}
+
+class _PortfolioPageState extends State<PortfolioPage> {
+  double _totalBalance = 10000.0;
+  double _totalPnL = 0.0;
+  final List<Map<String, dynamic>> _holdings = [];
+  final List<FlSpot> _pnlHistory = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPortfolio();
+  }
+
+  Future<void> _loadPortfolio() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _totalBalance = prefs.getDouble('paper_balance') ?? 10000.0;
+    });
+    // Sample PnL history
+    for (int i = 0; i < 7; i++) {
+      _pnlHistory.add(FlSpot(i.toDouble(), (i * 150.0 + (i % 3) * 50)));
+    }
+    // Sample holdings
+    _holdings.addAll([
+      {'symbol': 'BTC', 'amount': 0.05, 'avgPrice': 65000.0, 'currentPrice': 67500.0},
+      {'symbol': 'ETH', 'amount': 0.5, 'avgPrice': 3200.0, 'currentPrice': 3450.0},
+      {'symbol': 'SOL', 'amount': 10.0, 'avgPrice': 145.0, 'currentPrice': 165.0},
+    ]);
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totalValue = _holdings.fold<double>(0, (sum, h) => sum + (h['amount'] * h['currentPrice']));
+    final totalCost = _holdings.fold<double>(0, (sum, h) => sum + (h['amount'] * h['avgPrice']));
+    final pnl = totalValue - totalCost;
+    final pnlPercent = totalCost > 0 ? (pnl / totalCost * 100) : 0;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Portfolio Dashboard')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // KPI Cards
+            Row(
+              children: [
+                _kpiCard('Total Value', '\$${totalValue.toStringAsFixed(2)}', Colors.cyanAccent),
+                const SizedBox(width: 8),
+                _kpiCard('Total P&L', '\$${pnl.toStringAsFixed(2)} (${pnlPercent.toStringAsFixed(1)}%)', pnl >= 0 ? Colors.greenAccent : Colors.redAccent),
+                const SizedBox(width: 8),
+                _kpiCard('Cash Balance', '\$${_totalBalance.toStringAsFixed(2)}', Colors.amberAccent),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // PnL Chart
+            const Text('P&L History (7 days)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 200,
+              child: LineChart(
+                LineChartData(
+                  gridData: const FlGridData(show: true, drawVerticalLine: false),
+                  titlesData: FlTitlesData(
+                    bottomTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (v, _) => Text('D${v.toInt() + 1}', style: const TextStyle(fontSize: 10)))),
+                    leftTitles: AxisTitles(sideTitles: SideTitles(showTitles: true, getTitlesWidget: (v, _) => Text('\$${v.toInt()}', style: const TextStyle(fontSize: 10)))),
+                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
                   ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 34,
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      children: [
-                        ..._defaultButtons.map(
-                          (btn) => _buildPillButton(
-                            label: btn.label,
-                            onTap: () => _submitCommand(btn.command),
-                          ),
-                        ),
-                        ...List.generate(_customButtons.length, (index) {
-                          final btn = _customButtons[index];
-                          return _buildPillButton(
-                            label: btn.label,
-                            bgColor: const Color(0xFF0C4A6E),
-                            borderColor: const Color(0xFF0284C7),
-                            textColor: const Color(0xFFE0F2FE),
-                            onTap: () => _submitCommand(btn.command),
-                            onLongPress: () => _removeCustomButton(index),
-                          );
-                        }),
-                        _buildPillButton(
-                          label: 'Tombol',
-                          icon: Icons.add,
-                          bgColor: const Color(0xFF14532D),
-                          borderColor: const Color(0xFF22C55E),
-                          textColor: const Color(0xFFDCFCE7),
-                          onTap: _openCreateButtonDialog,
-                        ),
-                      ],
+                  borderData: FlBorderData(show: false),
+                  lineBarsData: [
+                    LineChartBarData(
+                      spots: _pnlHistory,
+                      isCurved: true,
+                      color: Colors.cyanAccent,
+                      barWidth: 3,
+                      dotData: const FlDotData(show: true),
+                      belowBarData: BarAreaData(show: true, color: Colors.cyanAccent.withOpacity(0.1)),
                     ),
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Holdings Table
+            const Text('Holdings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            ..._holdings.map((h) {
+              final value = h['amount'] * h['currentPrice'];
+              final cost = h['amount'] * h['avgPrice'];
+              final pnl = value - cost;
+              final pnlPct = cost > 0 ? (pnl / cost * 100) : 0;
+              return Card(
+                child: ListTile(
+                  leading: CircleAvatar(child: Text(h['symbol'][0])),
+                  title: Text('${h['symbol']} (${h['amount']})'),
+                  subtitle: Text('Avg: \$${h['avgPrice']} → Now: \$${h['currentPrice']}'),
+                  trailing: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      const Text(
-                        'paper@term:~\$ ',
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF22C55E),
-                        ),
-                      ),
-                      Expanded(
-                        child: TextField(
-                          controller: _cmdCtrl,
-                          style: const TextStyle(
-                              fontFamily: 'monospace', fontSize: 13),
-                          decoration: const InputDecoration(
-                            hintText: 'input perintah...',
-                            isDense: true,
-                            contentPadding: EdgeInsets.symmetric(vertical: 8),
-                            border: InputBorder.none,
-                          ),
-                          onSubmitted: _submitCommand,
-                        ),
-                      ),
-                      if (_pendingOrder != null) ...[
-                        _buildPillButton(
-                          label: 'Y',
-                          bgColor: const Color(0xFF14532D),
-                          borderColor: const Color(0xFF22C55E),
-                          textColor: const Color(0xFF4ADE80),
-                          onTap: () => _submitCommand('y'),
-                        ),
-                        _buildPillButton(
-                          label: 'N',
-                          bgColor: const Color(0xFF450A0A),
-                          borderColor: const Color(0xFFEF4444),
-                          textColor: const Color(0xFFFCA5A5),
-                          onTap: () => _submitCommand('n'),
-                        ),
-                      ] else
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          icon: const Icon(Icons.play_arrow,
-                              color: Color(0xFF22C55E)),
-                          onPressed: () => _submitCommand(_cmdCtrl.text),
-                        ),
+                      Text('\$${value.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text('${pnl >= 0 ? "+" : ""}\$${pnl.toStringAsFixed(2)} (${pnlPct.toStringAsFixed(1)}%)', style: TextStyle(color: pnl >= 0 ? Colors.greenAccent : Colors.redAccent, fontSize: 12)),
                     ],
                   ),
-                ],
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _kpiCard(String title, String value, Color color) {
+    return Expanded(
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              const SizedBox(height: 4),
+              Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: color)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SETTINGS PAGE - API Vault & Notifications
+// ═══════════════════════════════════════════════════════════════
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final TextEditingController _binanceKeyCtrl = TextEditingController();
+  final TextEditingController _binanceSecretCtrl = TextEditingController();
+  final TextEditingController _mt5LoginCtrl = TextEditingController();
+  final TextEditingController _mt5PassCtrl = TextEditingController();
+  final TextEditingController _mt5ServerCtrl = TextEditingController();
+  final TextEditingController _aiKeyCtrl = TextEditingController();
+  String _aiProvider = 'openai';
+  bool _notificationsEnabled = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    _binanceKeyCtrl.text = await _secureStorage.read(key: 'binance_api_key') ?? '';
+    _binanceSecretCtrl.text = await _secureStorage.read(key: 'binance_secret') ?? '';
+    _mt5LoginCtrl.text = await _secureStorage.read(key: 'mt5_login') ?? '';
+    _mt5PassCtrl.text = await _secureStorage.read(key: 'mt5_password') ?? '';
+    _mt5ServerCtrl.text = await _secureStorage.read(key: 'mt5_server') ?? '';
+    _aiKeyCtrl.text = await _secureStorage.read(key: 'ai_api_key') ?? '';
+    _aiProvider = await _secureStorage.read(key: 'ai_provider') ?? 'openai';
+    final prefs = await SharedPreferences.getInstance();
+    setState(() => _notificationsEnabled = prefs.getBool('notifications') ?? true);
+  }
+
+  Future<void> _saveSettings() async {
+    await _secureStorage.write(key: 'binance_api_key', value: _binanceKeyCtrl.text);
+    await _secureStorage.write(key: 'binance_secret', value: _binanceSecretCtrl.text);
+    await _secureStorage.write(key: 'mt5_login', value: _mt5LoginCtrl.text);
+    await _secureStorage.write(key: 'mt5_password', value: _mt5PassCtrl.text);
+    await _secureStorage.write(key: 'mt5_server', value: _mt5ServerCtrl.text);
+    await _secureStorage.write(key: 'ai_api_key', value: _aiKeyCtrl.text);
+    await _secureStorage.write(key: 'ai_provider', value: _aiProvider);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('notifications', _notificationsEnabled);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings saved!')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings & API Vault')),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('🔔 Notifications', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            SwitchListTile(
+              title: const Text('Trading Signal Notifications'),
+              value: _notificationsEnabled,
+              onChanged: (v) => setState(() => _notificationsEnabled = v),
+            ),
+            const Divider(),
+            const Text('🟡 Binance API', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            TextField(controller: _binanceKeyCtrl, decoration: const InputDecoration(labelText: 'API Key')),
+            TextField(controller: _binanceSecretCtrl, decoration: const InputDecoration(labelText: 'API Secret'), obscureText: true),
+            const SizedBox(height: 16),
+            const Text('🔵 MetaTrader 5', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            TextField(controller: _mt5LoginCtrl, decoration: const InputDecoration(labelText: 'Login')),
+            TextField(controller: _mt5PassCtrl, decoration: const InputDecoration(labelText: 'Password'), obscureText: true),
+            TextField(controller: _mt5ServerCtrl, decoration: const InputDecoration(labelText: 'Server')),
+            const SizedBox(height: 16),
+            const Text('🤖 AI Assistant', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            TextField(controller: _aiKeyCtrl, decoration: const InputDecoration(labelText: 'AI API Key'), obscureText: true),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              value: _aiProvider,
+              decoration: const InputDecoration(labelText: 'AI Provider', border: OutlineInputBorder()),
+              items: const [
+                DropdownMenuItem(value: 'openai', child: Text('OpenAI (GPT-4o-mini)')),
+                DropdownMenuItem(value: 'claude', child: Text('Anthropic (Claude Haiku)')),
+                DropdownMenuItem(value: 'gemini', child: Text('Google (Gemini Flash)')),
+              ],
+              onChanged: (v) => setState(() => _aiProvider = v!),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _saveSettings,
+                icon: const Icon(Icons.save),
+                label: const Text('Save Settings'),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// NOTIFICATION SERVICE
+// ═══════════════════════════════════════════════════════════════
+class NotificationService {
+  final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
+
+  Future<void> init() async {
+    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const initSettings = InitializationSettings(android: androidSettings);
+    await _plugin.initialize(initSettings);
+  }
+
+  Future<void> show(String title, String body) async {
+    const androidDetails = AndroidNotificationDetails(
+      'trading_signals',
+      'Trading Signals',
+      channelDescription: 'Notifications for trading signals and order executions',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+    const details = NotificationDetails(android: androidDetails);
+    await _plugin.show(DateTime.now().millisecondsSinceEpoch ~/ 1000, title, body, details);
   }
 }
